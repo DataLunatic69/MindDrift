@@ -39,6 +39,13 @@ class FragmentRead(BaseModel):
     media_urls: list[str] | None
     thumbnail_url: str | None
     tags: list[str] | None
+    entities: dict | None = None
+    # Rich creative artifacts produced by the ingest graph:
+    #   extra_metadata.vision  → image insight (headline, hidden details, …)
+    #   extra_metadata.spark   → text spark   (sparks, tensions, a_question, …)
+    # Kept as a single blob instead of flat fields so we can iterate on the
+    # schema without DB migrations.
+    extra_metadata: dict | None = None
     canvas_x: float
     canvas_y: float
     drift_vx: float

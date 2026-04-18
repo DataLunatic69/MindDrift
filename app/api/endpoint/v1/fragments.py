@@ -6,29 +6,64 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.schemas.common import PaginatedResponse
 from app.api.schemas.fragments import FragmentCompact, FragmentCreate, FragmentRead, FragmentUpdate
 from app.core.database import get_db
+from app.models.drift import DriftMode
 from app.models.fragment import FragmentStatus
 from app.models.user import User
 from app.security import get_current_user
+from app.services.drift_service import DriftLimitError, DriftService
 from app.services.fragment_service import FragmentService
-from app.workers.tasks import ingest_fragment
+from app.workers.tasks import ingest_fragment, run_drift_for_drift
 
 router = APIRouter(prefix="/fragments", tags=["fragments"])
+
+
+async def _attach_to_drift_if_requested(
+    db: AsyncSession,
+    drift_id: uuid.UUID | None,
+    owner_id: uuid.UUID,
+    fragment_id: uuid.UUID,
+    seed_x: float | None = None,
+    seed_y: float | None = None,
+) -> None:
+    """Place the new fragment into the target drift and, if it's LIVE, kick a tick."""
+    if drift_id is None:
+        return
+    drift_service = DriftService(db)
+    drift = await drift_service.get_drift(drift_id, owner_id)
+    if not drift:
+        raise HTTPException(status_code=404, detail="Drift not found")
+    try:
+        await drift_service.add_members(
+            drift_id, owner_id, [fragment_id], seed_x=seed_x, seed_y=seed_y
+        )
+    except DriftLimitError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if drift.mode == DriftMode.LIVE:
+        run_drift_for_drift.delay(str(drift_id))
 
 
 @router.post("/", response_model=FragmentRead, status_code=status.HTTP_201_CREATED)
 async def create_text_fragment(
     data: FragmentCreate,
+    drift_id: uuid.UUID | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a text-only fragment."""
+    """
+    Create a text-only fragment. If `drift_id` is set, also add it to that drift
+    and (for LIVE drifts) trigger an immediate physics tick — the path behind
+    real-time dumping of a scrape into a drift.
+    """
     service = FragmentService(db)
     fragment = await service.create_text_fragment(user.id, data)
+
+    await _attach_to_drift_if_requested(
+        db, drift_id, user.id, fragment.id,
+        seed_x=data.canvas_x, seed_y=data.canvas_y,
+    )
     await db.commit()
 
-    # Kick off async ingestion pipeline
     ingest_fragment.delay(str(fragment.id), str(user.id))
-
     return fragment
 
 
@@ -37,12 +72,20 @@ async def upload_media_fragment(
     files: list[UploadFile] = File(...),
     title: str | None = Form(None),
     text_content: str | None = Form(None),
-    tags: str | None = Form(None),  # comma-separated
+    tags: str | None = Form(None),
+    drift_id: uuid.UUID | None = Form(None),
+    canvas_x: float | None = Form(None),
+    canvas_y: float | None = Form(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upload images, audio, or video as a fragment."""
-    # Validate file types
+    """
+    Upload images, audio (voice), or video. `drift_id` optional — if set, the
+    media fragment lands directly in that drift. Real-time voice: a browser-
+    recorded audio blob hitting this endpoint with drift_id=X will be ingested
+    (Whisper → embed → Qdrant) and start drifting within seconds because the
+    ingest pipeline flips the fragment to ACTIVE and we trigger a tick on drop.
+    """
     allowed_prefixes = ("image/", "audio/", "video/")
     for f in files:
         if not f.content_type or not f.content_type.startswith(allowed_prefixes):
@@ -61,10 +104,14 @@ async def upload_media_fragment(
         text_content=text_content,
         tags=parsed_tags,
     )
+
+    await _attach_to_drift_if_requested(
+        db, drift_id, user.id, fragment.id,
+        seed_x=canvas_x, seed_y=canvas_y,
+    )
     await db.commit()
 
     ingest_fragment.delay(str(fragment.id), str(user.id))
-
     return fragment
 
 
@@ -88,7 +135,7 @@ async def get_canvas_fragments(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get all active fragments for canvas rendering (compact format)."""
+    """Legacy: all active fragments with positions on the Fragment row itself."""
     service = FragmentService(db)
     return await service.get_canvas_fragments(user.id)
 

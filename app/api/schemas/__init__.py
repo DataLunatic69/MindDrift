@@ -4,6 +4,7 @@ from app.api.schemas.canvas import (
     DriftEvent,
     PositionUpdate,
 )
+from app.api.schemas.auth import AuthSessionResponse, AuthUserResponse, LogoutResponse
 from app.api.schemas.collisions import CollisionRead, CollisionResolve
 from app.api.schemas.common import ErrorResponse, HealthResponse, PaginatedResponse, PaginationParams
 from app.api.schemas.fragments import (
@@ -28,4 +29,7 @@ __all__ = [
     "BatchPositionUpdate",
     "DriftEvent",
     "CollisionEvent",
+    "AuthUserResponse",
+    "AuthSessionResponse",
+    "LogoutResponse",
 ]
